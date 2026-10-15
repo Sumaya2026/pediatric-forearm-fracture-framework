@@ -20,6 +20,7 @@ import argparse
 import random
 from torch.optim.lr_scheduler import StepLR
 import timm
+from sklearn.model_selection import train_test_split
 from models import URFNet
 
 os.environ["CUDA_VISIBLE_DEVICES"] = "0"
@@ -56,33 +57,37 @@ def save_history(history, prefix):
     fig, (a1, a2) = plt.subplots(1, 2, figsize=(11, 3.5))
     a1.plot(history["epoch"], history["train_loss"])
     a1.set_title("Training loss"); a1.set_xlabel("epoch")
-    a2.plot(history["epoch"], [x * 100 for x in history["test_acc"]], label="accuracy")
-    a2.plot(history["epoch"], [x * 100 for x in history["test_f1"]], label="macro-F1")
-    a2.set_title("Test metrics (%)"); a2.set_xlabel("epoch"); a2.legend()
+    a2.plot(history["epoch"], [x * 100 for x in history["val_acc"]], label="accuracy")
+    a2.plot(history["epoch"], [x * 100 for x in history["val_f1"]], label="macro-F1")
+    a2.set_title("Validation metrics (%)"); a2.set_xlabel("epoch"); a2.legend()
     fig.tight_layout(); fig.savefig(prefix + ".png", dpi=120); plt.close(fig)
 
-def train(model, train_root, test_root, batch_size, lr, epochs, weight_power=1.0):
-    # step1: data
+def train(model, train_root, batch_size, lr, epochs, weight_power=1.0, val_ratio=0.15, seed=123):
+    # step1: data — split train.json into train / validation (test.json is NOT used here)
     with open(train_root, 'r') as fr:
-        train_imgs = json.load(fr)
-    with open(test_root, 'r') as fr:
-        test_imgs = json.load(fr)
+        all_imgs = json.load(fr)
+    labels = [label_of(p) for p in all_imgs]
+    train_imgs, val_imgs = train_test_split(all_imgs, test_size=val_ratio,
+                                            stratify=labels, random_state=seed)
+    print(f"Split: {len(train_imgs)} train / {len(val_imgs)} val (stratified, seed {seed})")
 
     train_data = Clsdata(train_imgs, train=True, shuffle=True)
-    test_data  = Clsdata(test_imgs,  train=False, shuffle=False, test=True)
+    val_data   = Clsdata(val_imgs, train=False, shuffle=False, test=True)   # no augmentation
     train_dataloader = DataLoader(train_data, batch_size=batch_size, shuffle=True, num_workers=4)
-    test_dataloader  = DataLoader(test_data,  batch_size=batch_size, shuffle=False, num_workers=4)
+    val_dataloader   = DataLoader(val_data, batch_size=batch_size, shuffle=False, num_workers=4)
     train_length = len(train_data)
 
-    # step2: weighted criterion and optimizer
+    # step2: weighted criterion and optimizer (weights from the training part only)
     cls_w = class_weights(train_imgs, power=weight_power).to(device)
     criterion_cls = torch.nn.CrossEntropyLoss(weight=cls_w)
     optimizer = torch.optim.SGD(model.parameters(), lr=lr, momentum=0.9, weight_decay=5e-4)
     scheduler = StepLR(optimizer, step_size=100, gamma=0.5)
 
-    best_path = f'./URFNet.pth'                       # keep this exact string (your notebook's sed patches it)
+    best_path = f'./URFNet_V2.pth'
     hist_prefix = os.path.splitext(best_path)[0] + "_history"
-    history = {"epoch": [], "train_loss": [], "test_acc": [], "test_f1": []}
+    with open(os.path.splitext(best_path)[0] + "_split.json", "w") as f:   # record the split
+        json.dump({"train": train_imgs, "val": val_imgs}, f, indent=2)
+    history = {"epoch": [], "train_loss": [], "val_acc": [], "val_f1": []}
     best_f1, best_acc, bestEpoch = 0.0, 0.0, -1
 
     # step3: training
@@ -106,15 +111,14 @@ def train(model, train_root, test_root, batch_size, lr, epochs, weight_power=1.0
         epoch_loss /= train_length
         epochEnd = time.time()
 
-        # step4: test
-        acc_cls, f1_cls = val(model, test_dataloader)
+        # step4: validate
+        acc_cls, f1_cls = val(model, val_dataloader)
         history["epoch"].append(epoch + 1)
         history["train_loss"].append(float(epoch_loss))
-        history["test_acc"].append(float(acc_cls))
-        history["test_f1"].append(float(f1_cls))
-        save_history(history, hist_prefix)
+        history["val_acc"].append(float(acc_cls))
+        history["val_f1"].append(float(f1_cls))
 
-        print("Epoch : {:03d}, Loss: {:.4f}, Acc: {:.2f}%, Macro-F1: {:.2f}%, Time: {:.1f}s".format(
+        print("Epoch : {:03d}, Loss: {:.4f}, Val Acc: {:.2f}%, Val F1: {:.2f}%, Time: {:.1f}s".format(
             epoch + 1, epoch_loss, acc_cls * 100, f1_cls * 100, epochEnd - epochStart))
 
         if f1_cls > best_f1:                          # select by macro-F1, not accuracy
@@ -148,6 +152,8 @@ if __name__=='__main__':
     ap.add_argument("-s","--seed", type=int, default=123, help="seed")
     ap.add_argument("-wp", "--weight-power", type=float, default=1.0,
                   help="1.0 = raw inverse-frequency weights, 0.5 = softened (sqrt)")
+    ap.add_argument("-vr", "--val-ratio", type=float, default=0.15,
+                    help="fraction of train.json held out for validation")
     args = vars(ap.parse_args())
 
     seed_all(args['seed'])
@@ -158,6 +164,6 @@ if __name__=='__main__':
     model = model.to(device)
     print(model)
 
-train(model, train_root=train_root, test_root=test_root,
-        batch_size=args["batch_size"], lr=args["learning_rate"], epochs=args["epochs"],
-        weight_power=args["weight_power"])
+    train(model, train_root=train_root,
+          batch_size=args["batch_size"], lr=args["learning_rate"], epochs=args["epochs"],
+          weight_power=args["weight_power"], val_ratio=args["val_ratio"], seed=args["seed"])
