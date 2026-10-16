@@ -56,6 +56,7 @@ def test(model, test_root,  batch_size):
 
     labels = [0, 1, 2]
     names = ["Proximal", "Midshaft", "Distal"]
+    Acc = accuracy_score(y_true, y_pred)
     Pre = precision_score(y_true, y_pred, average='macro', labels=labels, zero_division=0)
     Rec = recall_score(y_true, y_pred, average='macro', labels=labels, zero_division=0)
     F1  = f1_score(y_true, y_pred, average='macro', labels=labels, zero_division=0)   # true macro-F1
