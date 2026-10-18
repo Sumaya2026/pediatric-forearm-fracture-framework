@@ -5,6 +5,8 @@ from PIL import Image, ImageOps
 from torch.utils.data import Dataset
 from torchvision import transforms
 from torchvision.transforms import functional as TF
+import pandas as pd
+import torch
 
 
 class Clsdata(Dataset):
